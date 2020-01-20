@@ -1299,8 +1299,7 @@ bool X86MachineInstructionRaiser::raiseBinaryOpMemToRegInstr(
         new LoadInst(dyn_cast<LoadInst>(MemRefValue)->getPointerOperand(),
                      "globalload", false, MaybeAlign(MemAlignment));
     LoadValue = getRaisedValues()->setInstMetadataRODataContent(LdInst);
-  }
-  else {
+  } else {
     LoadInst *LdInst =
         new LoadInst(MemRefValue, "memload", false, MaybeAlign(MemAlignment));
     LoadValue = getRaisedValues()->setInstMetadataRODataContent(LdInst);
@@ -1655,13 +1654,23 @@ bool X86MachineInstructionRaiser::raiseMoveFromMemInstr(const MachineInstr &MI,
           isa<GetElementPtrInst>(MemRefValue)) &&
          "Unexpected type of memory reference in binary mem op instruction");
 
-  if (IsPCRelMemRef && !isa<GetElementPtrInst>(MemRefValue)) {
-    // memRefValue already represents the global value loaded from
-    // PC-relative memory location. It is incorrect to generate an
-    // additional load of this value. It should be directly used.
-    raisedValues->setPhysRegSSAValue(LoadPReg, MI.getParent()->getNumber(),
-                                     MemRefValue);
-  } else {
+  // Assume that MemRefValue represents a memory reference location and hence
+  // needs to be loaded from.
+  bool LoadFromMemrefValue = true;
+  // Following are the exceptions when MemRefValue needs to be considered as
+  // memory content and not as memory reference.
+  if (IsPCRelMemRef) {
+    // If it is a PC-relative global variable with an initializer, it is memory
+    // content and should not be loaded from.
+    if (auto GV = dyn_cast<GlobalVariable>(MemRefValue))
+      LoadFromMemrefValue = !(GV->hasInitializer());
+    // If it is not a PC-relative GetElementPtrInst, it is memory content and
+    // should not be loaded from.
+    else
+      LoadFromMemrefValue = isa<GetElementPtrInst>(MemRefValue);
+  }
+
+  if (LoadFromMemrefValue) {
     // If it is an effective address value or a select instruction, convert it
     // to a pointer to load register type.
     PointerType *PtrTy =
@@ -1762,6 +1771,12 @@ bool X86MachineInstructionRaiser::raiseMoveFromMemInstr(const MachineInstr &MI,
                                        ExtInst);
     } // else PhysReg is already updated in the default case of the above switch
       // statement
+  } else {
+    // memRefValue already represents the global value loaded from
+    // PC-relative memory location. It is incorrect to generate an
+    // additional load of this value. It should be directly used.
+    raisedValues->setPhysRegSSAValue(LoadPReg, MI.getParent()->getNumber(),
+                                     MemRefValue);
   }
 
   return true;
@@ -3204,6 +3219,9 @@ bool X86MachineInstructionRaiser::raiseBinaryOpImmToRegMachineInstr(
     case X86::TEST16ri:
     case X86::TEST32ri:
       BinOpInstr = BinaryOperator::CreateAnd(SrcOp1Value, SrcOp2Value);
+      // Clear OF and CF
+      raisedValues->setEflagValue(EFLAGS::OF, MBBNo, false);
+      raisedValues->setEflagValue(EFLAGS::CF, MBBNo, false);
       AffectedEFlags.insert(EFLAGS::SF);
       AffectedEFlags.insert(EFLAGS::ZF);
       break;
@@ -3683,9 +3701,13 @@ bool X86MachineInstructionRaiser::raiseReturnMachineInstr(
 
   // If RetType is a pointer type and RetValue type is 64-bit, cast RetValue
   // appropriately.
-  if ((RetValue != nullptr) && RetType->isPointerTy() && (retReg == X86::RAX)) {
+  if ((RetValue != nullptr) && RetType->isPointerTy() && (retReg == X86::RAX))
     RetValue = getRaisedValues()->castValue(RetValue, RetType, RaisedBB);
-  }
+
+  // Ensure RetValue type match RetType
+  if (RetValue != nullptr)
+    RetValue = getRaisedValues()->castValue(RetValue, RetType, RaisedBB);
+
   // Create return instruction
   Instruction *retInstr =
       ReturnInst::Create(MF.getFunction().getContext(), RetValue);
