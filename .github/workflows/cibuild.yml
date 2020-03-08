@@ -13,6 +13,7 @@ jobs:
     steps:
     - name: prerequisites
       run: |
+        sudo du -sh ./*
         echo 'deb http://apt.llvm.org/bionic/ llvm-toolchain-bionic main' | sudo tee -a /etc/apt/sources.list
         sudo apt update
         sudo apt install -y ninja-build clang
